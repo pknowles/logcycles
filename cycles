@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+import sys
+import queue
+import time
+import threading
+
+class Group:
+    def __init__(self, line, ts, count):
+        self.ts = ts
+        self.count = count
+        self.line = line
+    def __str__(self):
+        return self.line
+
+class Grouper(threading.Thread):
+    def __init__(self):
+        super().__init__()
+        self.running = False
+
+        # Log lines in which to find cycles
+        self.history = []
+
+        # Maximum cycle size that can be detected (keep small to avoid memory/perf issues)
+        self.history_max_size=3
+
+        # Maximum age to keep logs buffered (keep small to reduce latency)
+        self.history_max_age=3
+
+        # Buffered input from stdin
+        self.input = queue.Queue(100)
+
+    def run(self):
+        self.running = True
+        while not self.input.empty() or self.running:
+            # Keep as many logs as possible until history_max_age forces us to print them, to maximize cycle size found
+            expire_time = time.time() - self.history_max_age
+            if len(self.history):
+                timeout = max(0.0, self.history[0].ts - expire_time)
+            else:
+                timeout = 0.1
+
+            # Get more lines of logs
+            ts, line = self.input.get(timeout=timeout)
+            self.history += [Group(line, ts, 1)]
+
+            # If we've kept log lines for too long, find cycles and print them
+            if self.history[0].ts > expire_time or len(self.history) > self.history_max_size:
+                self.collapse()
+
+                # Print only the cycles that are about to expire
+                while len(self.history) and self.history[0].ts > expire_time:
+                    sys.stdout.write(str(self.history[0]))
+                    del self.history[0]
+
+    def collapse(self):
+        pass
+
+    def addLine(self, line):
+        self.input.put((time.time(), line))
+    
+    def stop(self):
+        self.running = False
+        # TODO: interrupt the thread so we don't wait for history_max_age
+        self.join()
+
+if __name__ == '__main__':
+    g = Grouper()
+    g.start()
+    for line in sys.stdin:
+        g.addLine(line)
+    g.stop()
