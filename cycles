@@ -5,11 +5,12 @@ import time
 import threading
 
 class Group(str):
-    def __new__(cls, text, formatted, ts, count):
+    def __new__(cls, text, formatted, ts, count, lines):
         obj = str.__new__(cls, text)
         obj.ts = ts
         obj.count = count
         obj.formatted = formatted
+        obj.lines = lines
         return obj
 
 class Grouper(threading.Thread):
@@ -58,7 +59,7 @@ class Grouper(threading.Thread):
             # Get more lines of logs
             try:
                 ts, line = self.input.get(timeout=timeout)
-                self.history += [Group(line, line, ts, 1)]
+                self.history += [Group(line, line, ts, 1, 1)]
                 if self.debug: print("Got:", repr(self.history[-1]), file=sys.stderr)
             except queue.Empty:
                 pass
@@ -86,10 +87,19 @@ class Grouper(threading.Thread):
         #print("testing", self.history, file=sys.stderr)
         for j in range(len(self.history) - 1):
             recent = self.history[-j-1:]
-            recent_formatted = "".join(self.format_group(g) for g in recent)
+            recent_formatted = None
+            recent_lines = sum(g.lines for g in recent)
             for i in range(j + 1, len(self.history)):
                 old = self.history[-i-1:-j-1]
+                old_lines = sum(g.lines for g in old)
+
+                # Minor optimization, check line count of groups first. ideally this would be a hash of the contents
+                if old_lines != recent_lines: continue
+
+                if recent_formatted == None:
+                    recent_formatted = "".join(self.format_group(g) for g in recent)
                 old_formatted = "".join(self.format_group(g) for g in old)
+
                 if self.debug: print("Testing:", self.history, repr(old_formatted), repr(recent_formatted), file=sys.stderr)
                 if (len(old) == 1 and "".join(g.formatted for g in recent) == old[0].formatted) or old_formatted == recent_formatted:
                     if self.debug: print("Collapsing:", list(map(self.format_group, self.history)), repr(recent_formatted), file=sys.stderr)
@@ -105,7 +115,7 @@ class Grouper(threading.Thread):
                         del self.history[-i-1:]
 
                         # Create a new group holding all of them
-                        self.history += [Group("".join(old), old_formatted, recent[0].ts, 2)]
+                        self.history += [Group("".join(old), old_formatted, recent[0].ts, 2, old_lines)]
                     return True
         return False
     
