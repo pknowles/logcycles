@@ -4,24 +4,32 @@ import queue
 import time
 import threading
 
-class Group:
-    def __init__(self, line, ts, count):
-        self.ts = ts
-        self.count = count
-        self.line = line
-    def __str__(self):
-        return self.line
+class Group(str):
+    def __new__(cls, text, formatted, ts, count):
+        obj = str.__new__(cls, text)
+        obj.ts = ts
+        obj.count = count
+        obj.formatted = formatted
+        return obj
 
 class Grouper(threading.Thread):
-    def __init__(self):
+    def __init__(self, file, **kwargs):
         super().__init__()
+        self.file = file
         self.running = False
+        self.status = 0
+        self.exc_info = None
+        self.debug = False
+
+        self.strip = kwargs.pop("strip", False)
+        if len(kwargs):
+            raise KeyError("Unexpected arguments: {}".format(repr(kwargs)))
 
         # Log lines in which to find cycles
         self.history = []
 
         # Maximum cycle size that can be detected (keep small to avoid memory/perf issues)
-        self.history_max_size=3
+        self.history_max_size=100
 
         # Maximum age to keep logs buffered (keep small to reduce latency)
         self.history_max_age=3
@@ -30,8 +38,16 @@ class Grouper(threading.Thread):
         self.input = queue.Queue(100)
 
     def run(self):
-        self.running = True
-        while not self.input.empty() or self.running:
+        try:
+            self.running = True
+            while not self.input.empty() or self.running:
+                self.process_line()
+        except:
+            self.status = 1
+            self.exc_info = sys.exc_info()
+            raise
+
+    def process_line(self):
             # Keep as many logs as possible until history_max_age forces us to print them, to maximize cycle size found
             expire_time = time.time() - self.history_max_age
             if len(self.history):
@@ -40,20 +56,63 @@ class Grouper(threading.Thread):
                 timeout = 0.1
 
             # Get more lines of logs
-            ts, line = self.input.get(timeout=timeout)
-            self.history += [Group(line, ts, 1)]
+            try:
+                ts, line = self.input.get(timeout=timeout)
+                self.history += [Group(line, line, ts, 1)]
+                if self.debug: print("Got:", repr(self.history[-1]), file=sys.stderr)
+            except queue.Empty:
+                pass
 
-            # If we've kept log lines for too long, find cycles and print them
-            if self.history[0].ts > expire_time or len(self.history) > self.history_max_size:
-                self.collapse()
+            self.process_history(expire_time)
 
-                # Print only the cycles that are about to expire
-                while len(self.history) and self.history[0].ts > expire_time:
-                    sys.stdout.write(str(self.history[0]))
-                    del self.history[0]
+    def process_history(self, expire_time):
+        if not len(self.history):
+            return
 
-    def collapse(self):
-        pass
+        while self.collapse_one():
+            pass
+
+        # If we've kept log lines for too long or there's too many, print them
+        while len(self.history) and (expire_time is None or
+                                     self.history[0].ts < expire_time or
+                                     len(self.history) > self.history_max_size):
+            g = self.history.pop(0)
+            if not self.strip:
+                g = self.format_group(g)
+            if self.debug: print("Writing:", repr(g), file=sys.stderr)
+            self.file.write(g)
+
+    def collapse_one(self):
+        #print("testing", self.history, file=sys.stderr)
+        for j in range(len(self.history) - 1):
+            recent = self.history[-j-1:]
+            recent_formatted = "".join(self.format_group(g) for g in recent)
+            for i in range(j + 1, len(self.history)):
+                old = self.history[-i-1:-j-1]
+                old_formatted = "".join(self.format_group(g) for g in old)
+                if self.debug: print("Testing:", self.history, repr(old_formatted), repr(recent_formatted), file=sys.stderr)
+                if (len(old) == 1 and "".join(g.formatted for g in recent) == old[0].formatted) or old_formatted == recent_formatted:
+                    if self.debug: print("Collapsing:", list(map(self.format_group, self.history)), repr(recent_formatted), file=sys.stderr)
+                    if len(old) == 1:
+                        # Increment the old group count and update the timestamp
+                        old[0].count += 1
+                        old[0].ts = recent[0].ts
+
+                        # Delete the recent group
+                        del self.history[-j-1:]
+                    else:
+                        # Delete old and recent
+                        del self.history[-i-1:]
+
+                        # Create a new group holding all of them
+                        self.history += [Group("".join(old), old_formatted, recent[0].ts, 2)]
+                    return True
+        return False
+    
+    def format_group(self, group):
+        if group.count > 1:
+            return "> Repeat {}:\n| ".format(group.count) + "| ".join(group.formatted.splitlines(True))
+        return group.formatted
 
     def addLine(self, line):
         self.input.put((time.time(), line))
@@ -63,9 +122,16 @@ class Grouper(threading.Thread):
         # TODO: interrupt the thread so we don't wait for history_max_age
         self.join()
 
+        # Print any remaining history in the buffer
+        self.process_history(None)
+        self.file.close()
+
 if __name__ == '__main__':
-    g = Grouper()
+    g = Grouper(sys.stdout)
     g.start()
-    for line in sys.stdin:
-        g.addLine(line)
-    g.stop()
+    try:
+        for line in sys.stdin:
+            g.addLine(line)
+    finally:
+        g.stop()
+    sys.exit(g.status)
