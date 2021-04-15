@@ -3,6 +3,7 @@ import sys
 import queue
 import time
 import threading
+import argparse
 
 class Group(str):
     def __new__(cls, text, formatted, ts, count, lines):
@@ -22,18 +23,19 @@ class Grouper(threading.Thread):
         self.exc_info = None
         self.debug = False
 
+        # Maximum cycle size that can be detected (keep small to avoid memory/perf issues)
+        self.history_max_size = kwargs.pop("buffer_size", 100)
+
+        # Maximum age in seconds to keep logs buffered (keep small to reduce latency)
+        self.history_max_age = kwargs.pop("timeout", 3)
+
         self.strip = kwargs.pop("strip", False)
+
         if len(kwargs):
             raise KeyError("Unexpected arguments: {}".format(repr(kwargs)))
 
         # Log lines in which to find cycles
         self.history = []
-
-        # Maximum cycle size that can be detected (keep small to avoid memory/perf issues)
-        self.history_max_size=100
-
-        # Maximum age to keep logs buffered (keep small to reduce latency)
-        self.history_max_age=3
 
         # Buffered input from stdin
         self.input = queue.Queue(100)
@@ -137,7 +139,13 @@ class Grouper(threading.Thread):
         self.file.close()
 
 if __name__ == '__main__':
-    g = Grouper(sys.stdout)
+    parser = argparse.ArgumentParser(description="Collapse cycles in logs.")
+    parser.add_argument("-b", "--buffer", help="set the internal buffer size", type=int, default=100)
+    parser.add_argument("-t", "--timeout", help="set the time in seconds to keep lines in case more complete a cycle", type=float, default=3.0)
+    parser.add_argument("--strip", help="output unique lines only, without repeat decorations")
+    args = parser.parse_args()
+
+    g = Grouper(sys.stdout, strip=args.strip, buffer_size=args.buffer, timeout=args.timeout)
     g.start()
     try:
         for line in sys.stdin:
