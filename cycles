@@ -52,9 +52,10 @@ class Grouper(threading.Thread):
 
     def process_line(self):
             # Keep as many logs as possible until history_max_age forces us to print them, to maximize cycle size found
+            # There is no way for the other side of the queue to unblock the producer when EOF is reached, so the timeout is capped.
             expire_time = time.time() - self.history_max_age
             if len(self.history):
-                timeout = max(0.0, self.history[0].ts - expire_time)
+                timeout = min(max(0.0, self.history[0].ts - expire_time), 0.1)
             else:
                 timeout = 0.1
 
